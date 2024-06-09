@@ -19,6 +19,8 @@ contract IncentivesHook is BaseHook {
     using Pool for Pool.State;
     using StateLibrary for IPoolManager;
 
+    PoolKey public poolKey;
+
     uint256 public rewardRate;
     uint256 public rewardReserve;
     uint256 public periodFinish;
@@ -32,7 +34,6 @@ contract IncentivesHook is BaseHook {
     mapping(int24 => RewardInfo) public ticks;
 
     int24 private activeTick;
-
     uint256 private _lastUpdated;
 
     constructor(IPoolManager _poolManager) BaseHook(_poolManager) { }
@@ -40,7 +41,7 @@ contract IncentivesHook is BaseHook {
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
             beforeInitialize: false,
-            afterInitialize: false,
+            afterInitialize: true,
             beforeAddLiquidity: true,
             afterAddLiquidity: true,
             beforeRemoveLiquidity: false,
@@ -56,15 +57,20 @@ contract IncentivesHook is BaseHook {
         });
     }
 
-    function beforeAddLiquidity(
-        address,
+    function afterInitialize(
+        address sender,
         PoolKey calldata key,
-        IPoolManager.ModifyLiquidityParams calldata,
-        bytes calldata
+        uint160 sqrtPriceX96,
+        int24 tick,
+        bytes calldata hookData
     ) external override returns (bytes4) {
-        // We use this hook to update state before a liquidity change has happened.
+        poolKey = key;
+        activeTick = tick; // We need to know where to begin
 
-        return BaseHook.beforeAddLiquidity.selector;
+        // TODO: Use `hookData` to initialize with reward info
+        // Uhh.. maybe not? This PoC maybe just do the math part
+
+        return BaseHook.afterInitialize.selector;
     }
 
     function beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata, bytes calldata)
@@ -86,6 +92,29 @@ contract IncentivesHook is BaseHook {
         (, int24 tick,,) = poolManager.getSlot0(key.toId());
 
         // Update the tick after the swap so future rewards go to active tick
+        activeTick = tick;
+
+        int24 zTick = tick;
+        // This step ideally happens in the pool manager since it already does the compute step for crossing through ticks,
+        // but we don't have that luxury so we'll do it here.
+        if (zTick < activeTick) {
+            for (; tick < activeTick;) {
+                ticks[zTick].rewardGrowthOutsideX128 = rewardGrowthGlobalX128 - ticks[zTick].rewardGrowthOutsideX128;
+
+                unchecked {
+                    tick += key.tickSpacing;
+                }
+            }
+        } else {
+            for (; activeTick < zTick;) {
+                ticks[zTick].rewardGrowthOutsideX128 = rewardGrowthGlobalX128 - ticks[zTick].rewardGrowthOutsideX128;
+
+                unchecked {
+                    tick -= key.tickSpacing;
+                }
+            }
+        }
+
         activeTick = tick;
 
         return (BaseHook.afterSwap.selector, 0);
@@ -117,6 +146,18 @@ contract IncentivesHook is BaseHook {
         stakedLiquidity -= positionInfo.liquidity;
 
         return (BaseHook.afterRemoveLiquidity.selector, BalanceDelta.wrap(0));
+    }
+
+    function beforeAddLiquidity(
+        address,
+        PoolKey calldata key,
+        IPoolManager.ModifyLiquidityParams calldata,
+        bytes calldata
+    ) external override returns (bytes4) {
+        // We use this hook to update state before a liquidity change has happened.
+        _updateRewardsGrowthGlobal();
+
+        return BaseHook.beforeAddLiquidity.selector;
     }
 
     function afterAddLiquidity(
@@ -155,15 +196,45 @@ contract IncentivesHook is BaseHook {
         }
     }
 
+    function getRewardGrowthInside(int24 tickLower, int24 tickUpper, int24 tickCurrent)
+        public
+        view
+        returns (uint256 rewardGrowthInsideX128)
+    {
+        RewardInfo storage lower = ticks[tickLower];
+        RewardInfo storage upper = ticks[tickUpper];
+
+        // calculate reward growth below
+        uint256 rewardGrowthBelowX128;
+        if (tickCurrent >= tickLower) {
+            rewardGrowthBelowX128 = lower.rewardGrowthOutsideX128;
+        } else {
+            rewardGrowthBelowX128 = rewardGrowthGlobalX128 - lower.rewardGrowthOutsideX128;
+        }
+
+        // calculate reward growth above
+        uint256 rewardGrowthAboveX128;
+        if (tickCurrent < tickUpper) {
+            rewardGrowthAboveX128 = upper.rewardGrowthOutsideX128;
+        } else {
+            rewardGrowthAboveX128 = rewardGrowthGlobalX128 - upper.rewardGrowthOutsideX128;
+        }
+
+        rewardGrowthInsideX128 = rewardGrowthGlobalX128 - rewardGrowthBelowX128 - rewardGrowthAboveX128;
+    }
+
     // Interactions
-    function earned(int24 tickLower, int24 tickUpper, int256 liquidity) public {
+    function earned(int24 tickLower, int24 tickUpper, int256 liquidity) public returns (uint256) {
+        _updateRewardsGrowthGlobal();
+
         uint256 timeDelta = block.timestamp - _lastUpdated;
 
-        // if (timeDelta != 0 && rewardReserve > 0 && pool.stakedLiquidity() > 0) {
-        //     uint256 reward = rewardRate * timeDelta;
-        //     if (reward > rewardReserve) reward = rewardReserve;
+        uint256 rewardPerTokenInsideInitialX128 = 0; // TODO: replace with position level tracking
+        uint256 rewardPerTokenInsideX128 = getRewardGrowthInside(tickLower, tickUpper, activeTick);
 
-        //     rewardGrowthGlobalX128 += FullMath.mulDiv(reward, FixedPoint128.Q128, pool.stakedLiquidity());
-        // }
+        uint256 claimable =
+            (rewardPerTokenInsideX128 - rewardPerTokenInsideInitialX128) * uint256(liquidity) / FixedPoint128.Q128;
+
+        return claimable;
     }
 }
