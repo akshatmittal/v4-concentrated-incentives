@@ -24,10 +24,6 @@ contract IncentivesHookTest is Test, Deployers {
     IncentivesHook hook;
     PoolId poolId;
 
-    address bob = makeAddr("bob");
-    address alice = makeAddr("alice");
-    address dylan = makeAddr("dylan");
-
     function setUp() public {
         // creates the pool manager, utility routers, and test tokens
         Deployers.deployFreshManagerAndRouters();
@@ -69,9 +65,5 @@ contract IncentivesHookTest is Test, Deployers {
         (uint256 scalar2, uint256 claimable2) = hook.earned(-200, 200, 1e18);
         console2.log("1", scalar1, claimable1);
         console2.log("2", scalar2, claimable2);
-
-        // // after 1 days the user will get some rewards
-        // amount = hook.earned(poolId, bob);
-        // assertGt(amount, 0);
     }
 }
