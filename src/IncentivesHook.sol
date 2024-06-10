@@ -21,9 +21,9 @@ contract IncentivesHook is BaseHook {
 
     PoolKey public poolKey;
 
-    uint256 public rewardRate;
-    uint256 public rewardReserve;
-    uint256 public periodFinish;
+    uint256 public rewardRate = 11574074074074;
+    uint256 public rewardReserve = 100e18;
+    uint256 public periodFinish = block.timestamp + 7 days;
 
     struct RewardInfo {
         uint256 rewardGrowthOutsideX128;
@@ -44,8 +44,8 @@ contract IncentivesHook is BaseHook {
             afterInitialize: true,
             beforeAddLiquidity: true,
             afterAddLiquidity: true,
-            beforeRemoveLiquidity: false,
-            afterRemoveLiquidity: false,
+            beforeRemoveLiquidity: true,
+            afterRemoveLiquidity: true,
             beforeSwap: true,
             afterSwap: true,
             beforeDonate: false,
@@ -224,17 +224,23 @@ contract IncentivesHook is BaseHook {
     }
 
     // Interactions
-    function earned(int24 tickLower, int24 tickUpper, int256 liquidity) public returns (uint256) {
+    function earned(int24 tickLower, int24 tickUpper, int256 liquidity)
+        public
+        returns (uint256 scalar, uint256 claimable)
+    {
         _updateRewardsGrowthGlobal();
 
         uint256 timeDelta = block.timestamp - _lastUpdated;
 
-        uint256 rewardPerTokenInsideInitialX128 = 0; // TODO: replace with position level tracking
+        uint256 rewardPerTokenInsideInitialX128 = 0; // NOTE: replace with position level tracking, when available in V4
+        // ^ Also track last known feeGrowthInside
         uint256 rewardPerTokenInsideX128 = getRewardGrowthInside(tickLower, tickUpper, activeTick);
 
-        uint256 claimable =
-            (rewardPerTokenInsideX128 - rewardPerTokenInsideInitialX128) * uint256(liquidity) / FixedPoint128.Q128;
+        scalar = (rewardPerTokenInsideX128 - rewardPerTokenInsideInitialX128) * uint256(liquidity) / FixedPoint128.Q128;
 
-        return claimable;
+        (uint256 feeGrowthInside0X128, uint256 feeGrowthInside1X128) =
+            poolManager.getFeeGrowthInside(poolKey.toId(), tickLower, tickUpper);
+
+        claimable = uint256(liquidity) * FixedPoint128.Q128 / (feeGrowthInside0X128 + feeGrowthInside1X128);
     }
 }
